@@ -27,8 +27,7 @@ Por último, se aplica un modelo de **PLS-DA** para predecir qué jugadores tien
 5. **Modelado predictivo**: PLS-DA (`Rmd/pls.Rmd`)  
 6. **Visualización de resultados y conclusiones**: se genera en `Rmd/trabajo_nba.Rmd`, que **combina de forma resumida los tres análisis anteriores** y produce las visualizaciones y conclusiones,
     exportadas luego al PDF (`docs/proyecto-nba.pdf`)
-   
-Esto deja claro que:
+
 ---
 
 ## Resultados
