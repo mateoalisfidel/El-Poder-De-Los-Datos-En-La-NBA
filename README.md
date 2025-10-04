@@ -8,7 +8,7 @@ la mayor parte de la variabilidad. Esto permite:
 - Detectar jugadores atípicos  
 - Segmentar jugadores en tipos como tiradores, interiores u organizadores  
 
-Además, se realiza un **clustering** útil para los General Managers de las franquicias, para poder tener un recambio de in jugador que quisieran fichar pero al final no se diera a cabo. 
+Además, se realiza un **clustering** útil para los General Managers de las franquicias, para poder tener un recambio de un jugador que quisieran fichar pero al final no se diera a cabo. 
 
 Por último, se aplica un modelo de **PLS-DA** para predecir qué jugadores tienen más probabilidades de ser **All-Star**, ayudando a entender el potencial de cada jugador en la liga.
 
