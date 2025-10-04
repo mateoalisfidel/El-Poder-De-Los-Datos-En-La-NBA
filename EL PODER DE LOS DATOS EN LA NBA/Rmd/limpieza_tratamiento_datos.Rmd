@@ -1,0 +1,569 @@
+---
+title: "LIMPIEZA_DATOS"
+date: "2025-03-07"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Librerias, include = FALSE}
+library(factoextra)
+library(FactoMineR)
+library(readr)
+library(corrplot)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+```
+
+## Lectura y preparación de datos
+
+Para comenzar con el estudio de los jugadores de la NBA, primero cargamos los datos desde un archivo CSV. Este archivo contiene información sobre las estadísticas de los jugadores durante la temporada 2022-2023.
+Para facilitar el estudio de las variables, se clasificarán automáticamente como numéricas o categóricas.
+
+
+```{r Lectura y preparación de datos}
+# 1. Cargar el dataset
+nba <- read.csv("nba_2022_2023.csv", as.is = TRUE)
+
+
+# 2. Clasificar automáticamente cada columna como numérica o categórica
+tipos <- sapply(nba, class)
+
+# 3. Crear un dataframe para describir las variables
+tipos_simple <- ifelse(
+  tipos %in% c("numeric", "integer") & sapply(nba, function(x) length(unique(x)) > 2),
+  "numerical",
+  "categorical"
+)
+descNba <- data.frame(
+  variable = names(tipos),
+  tipo = tipos_simple,
+  stringsAsFactors = FALSE
+)
+rownames(descNba) <- descNba$variable
+descNba
+
+```
+
+# Revisión de valores nulos o duplicados
+
+
+```{r Revisión nulos o duplicados}
+
+# 1. Revisar si hay valores nulos
+sum(is.na(nba))
+
+# 2. Revisar si hay duplicados
+sum(duplicated(nba))
+```
+Observamos que no tenemos nulos ni filas duplicadas, observaremos si la columna "Jugador" tiene datos duplicados
+
+```{r Revisión nulos o duplicados}
+# 3. Revisar si hay duplicados en la columna "Jugador"
+duplicados_jugador = nba[duplicated(nba$Jugador), "Jugador"]
+length(duplicados_jugador)
+
+```
+Se observa que tenemos 140 filas con jugadores duplicados, lo que indica que hay jugadores que han jugado en más de un equipo durante la temporada 2022-2023. Esto es normal en la NBA, ya que los jugadores pueden ser traspasados entre equipos.
+
+```{r Revisión nulos o duplicados}
+# 4. Revisar si hay duplicados en la columna "Jugador" y "Equipo"
+# Crear una nueva columna con la combinación jugador-equipo
+nba$Jugador_Equipo <- paste(nba$Jugador, nba$Equipo, sep = " - ")
+# Tabla de frecuencia de combinaciones
+frecuencias <- table(nba$Jugador_Equipo)
+
+# Filtrar las que aparecen más de una vez
+duplicados <- frecuencias[frecuencias > 1]
+
+# Ver duplicados encontrados
+duplicados
+
+
+```
+No observamos filas que tengan al mismo jugador en el mismo equipo, por lo que no es necesario eliminar filas.
+Pero juntaremos los casos que aparecen para jugadores duplicados, nos interesa las estadísticas del jugador a lo largo de la temporada
+, se agruparan por el nombre del jugador, se juntaran los equipos en los que ha estado, también las posiciones para saber si ha cambiado durante el año y en el caso de que tenga haya ido al all stars se conservará el 1. Para el caso de variables acumulables como partidos jugados, partidos como titular, minutos jugados, puntos, rebotes, asistencias, robos y tapones se sumaran. Para el resto de variables se tomara la media ponderada, usando como pesos los partidos jugados.
+
+
+```{r Revisión nulos o duplicados}
+# 5. Unificar jugadores duplicados
+
+nba_unificado <- nba %>%
+  group_by(Jugador) %>%
+  summarise(
+    Edad = first(Edad),
+    
+    # Categóricas
+    Posicion = paste(unique(Posicion), collapse = ", "),
+    Equipos = paste(unique(Equipo), collapse = ", "),
+    ALL_STARS = max(ALL_STARS, na.rm = TRUE),
+    
+    # Totales acumulativos
+    Partidos_jugados = sum(Partidos.jugados, na.rm = TRUE),
+    Partidos_titular = sum(Partidos.titular, na.rm = TRUE),
+    
+    # Medias por partido (ponderadas por Partidos.jugados)
+    Minutos_por_partido = weighted.mean(Minutos.por.partido, Partidos.jugados, na.rm = TRUE),
+    Tiros_anotados_pp = weighted.mean(Tiros.anotados.pp, Partidos.jugados, na.rm = TRUE),
+    Tiros_intentados_pp = weighted.mean(Tiros.intentados.pp, Partidos.jugados, na.rm = TRUE),
+    Triples_anotados_pp = weighted.mean(Triples.anotados.pp, Partidos.jugados, na.rm = TRUE),
+    Tripes_intentados_pp = weighted.mean(Tripes.intentados.pp, Partidos.jugados, na.rm = TRUE),
+    Tiros_2_anotados_pp = weighted.mean(Tiros.de.2.anotados.pp, Partidos.jugados, na.rm = TRUE),
+    Tiros_2_intentados_pp = weighted.mean(Tiros.de.2.intentados.pp, Partidos.jugados, na.rm = TRUE),
+    TL_anotados_pp = weighted.mean(Tl.anotados.pp, Partidos.jugados, na.rm = TRUE),
+    TL_intentados_pp = weighted.mean(Tl.intentados.pp, Partidos.jugados, na.rm = TRUE),
+    RO_pp = weighted.mean(Ro.pp, Partidos.jugados, na.rm = TRUE),
+    RD_pp = weighted.mean(Rd.pp, Partidos.jugados, na.rm = TRUE),
+    Rebotes_pp = weighted.mean(Rebotes.pp, Partidos.jugados, na.rm = TRUE),
+    Asistencias_pp = weighted.mean(Asistencias.pp, Partidos.jugados, na.rm = TRUE),
+    Robos_pp = weighted.mean(Robos.pp, Partidos.jugados, na.rm = TRUE),
+    Tapones_pp = weighted.mean(Tapones.pp, Partidos.jugados, na.rm = TRUE),
+    Perdidas_pp = weighted.mean(Perdidas.pp, Partidos.jugados, na.rm = TRUE),
+    Faltas_pp = weighted.mean(Faltas.pp, Partidos.jugados, na.rm = TRUE),
+    Puntos_pp = weighted.mean(Puntos.pp, Partidos.jugados, na.rm = TRUE),
+    
+    # Porcentajes (ponderados por intentos correspondientes)
+    Porcentaje_tiros_campo_pp = weighted.mean(Porcentaje.de.tiros.de.campo.pp, Tiros.intentados.pp, na.rm = TRUE),
+    Porcentaje_triples_pp = weighted.mean(Porcentaje.de.triples.pp, Tripes.intentados.pp, na.rm = TRUE),
+    Porcentaje_tiros_2_pp = weighted.mean(Porcentaje.de.tiros.de.2.pp, Tiros.de.2.intentados.pp, na.rm = TRUE),
+    Porcentaje_efectivo_tc = weighted.mean(Porcentaje.efectivo.en.tc, Tiros.intentados.pp, na.rm = TRUE),
+    Porcentaje_tl = weighted.mean(Porcentaje.de.tl, Tl.intentados.pp, na.rm = TRUE)
+  )
+
+ 
+```
+
+Al principio teníamos 679 filas distintas pero 140 tenían algún jugador duplicado
+
+```{r Revisión nulos o duplicados}
+# 6. Verificar el número de filas después de la unificación
+nrow(nba_unificado)
+head(nba_unificado)
+colnames(nba_unificado) <- tolower(colnames(nba_unificado))
+head(nba_unificado)
+ 
+```
+Ahora tenemos 539 filas, lo que indica que hemos unificado correctamente los jugadores duplicados. 
+
+
+# Escalado de datos
+
+La idea de fondo es que cuanto más juega un jugador, más puntos debería anotar. Sin embargo, esto no siempre es cierto: hay jugadores que, aunque disputen muchos minutos, tienen un rol más pasador o defensivo, y otros que, jugando poco, son extremadamente eficientes ofensivamente.
+Por lo tanto, es importante tener en cuenta el número de minutos jugados y los puntos anotados por partido para evaluar el rendimiento de un jugador.
+Calculamos las estadísticas por minuto real, y ponderaremos por minutos jugados por partido con la función log(x+1) de manera que demos más peso a los que más minutos juegan sin exagerlo. Con esto conseguimos que los jugadores que son muy productivos pero apenas juegan ya no se inflan y será una mejor escala para el PCA.
+Decidimos no tener en cuenta la variable "rebotes_pp" porque es la suma de los ofensivos y defensivos y no queremos tener redundancia en los datos.
+
+
+```{r Escalado de datos }
+
+# Creamos una nueva versión del dataset con variables ajustadas
+
+
+nba_ajustado <- nba_unificado %>%
+  mutate(
+    # Tiros de campo
+    tiros_anotados_aj = (tiros_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tiros_intentados_aj = (tiros_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Triples
+    triples_anotados_aj = (triples_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tripes_intentados_aj = (tripes_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Tiros de 2 puntos
+    tiros_2_anotados_aj = (tiros_2_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tiros_2_intentados_aj = (tiros_2_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Tiros libres
+    tl_anotados_aj = (tl_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tl_intentados_aj = (tl_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Rebotes
+    ro_aj = (ro_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    rd_aj = (rd_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    rebotes_aj = (rebotes_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Distribución
+    asistencias_aj = (asistencias_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Defensa activa
+    robos_aj = (robos_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tapones_aj = (tapones_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Errores y faltas
+    perdidas_aj = (perdidas_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    faltas_aj = (faltas_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Producción ofensiva total
+    puntos_aj = (puntos_pp / minutos_por_partido) * log1p(minutos_por_partido)
+  )%>% 
+  
+   select(jugador,
+         edad,
+         posicion,
+         equipos, all_stars, partidos_jugados,
+         partidos_titular,
+         ends_with("_aj"))
+
+
+```
+
+```{r Escalado de datos }
+head(nba_ajustado)
+```
+
+```{r Escalado de datos }
+
+# Carpeta donde guardar las imágenes (puedes cambiarla)
+dir.create("histos_nba", showWarnings = FALSE)
+
+# 1. Extraer la lista de variables numéricas
+num_vars <- nba_ajustado %>% 
+  select(where(is.numeric)) %>% 
+  names()
+
+# 2. Bucle: un histograma por variable
+for (v in num_vars) {
+  
+  p <- ggplot(nba_ajustado, aes(x = .data[[v]])) +
+         geom_histogram(bins = 30, fill = "steelblue", colour = "white") +
+         theme_minimal(base_size = 14) +
+         labs(title = paste("Distribución de", v),
+              x = NULL, y = "Frecuencia")
+  
+  # 3. Guardar como PNG (300 dpi) dentro de /histos_nba
+  ggsave(filename = paste0("histos_nba/", v, ".png"),
+         plot     = p,
+         width    = 5, height = 4, dpi = 300)
+}
+cat(length(num_vars), "histogramas guardados en la carpeta 'histos_nba'\n")
+
+
+```
+Faltas_aj tiene una distribución bastante normalizada, con una curtosis bastante leptocúrtica y un poco de cola hacia la derecha. Podría haber algún anómalo, hay un resultado con valor 1 
+En partidos jugados vemos una distribución bimodal, se observa que hay dos grupos , muchos jugadores que han jugado menos de 80 partidos y algunos que pasan dicho número, al observar los partidos que puede haber en un año, normalmente son 82 , pensamos que al haber sumado las estadísticas de los jugadores hay alguna que agrupe la de cada jugador. 
+Procedemos a revisar este caso, y a filtrar los jugadores que han jugado más de 82 partidos.
+
+```{r Escalado de datos }
+library(dplyr)
+
+jugadores_mas_82 <- nba_ajustado %>% 
+  filter(partidos_jugados > 82) %>%       
+  select(jugador,
+         equipos,
+         partidos_jugados,
+         partidos_titular,     # contexto de carga real
+         puntos_aj, rebotes_aj, asistencias_aj)   # métricas ajustadas clave
+
+print(jugadores_mas_82)
+
+
+```
+Se observa que todos los jugadores que han estado en varios equipos tienen un equipo llamado TOT, se trata de la sumas de cada jugador. 
+Seleccionaremos la fila que contenga TOT de los jugadores que han estado en varios equipos y ajustaremos las estadísticas como hemos hecho antes. 
+
+## Selección datos definitivos
+
+```{r Selección datos definitivos }
+nba_unique <- nba %>% 
+  group_by(Jugador) %>%                 # agrupa por nombre de jugador
+  slice(if (n() == 1) 1                 # si solo hay una fila, se queda
+        else which(Equipo == "TOT")[1] # si hay varias, elige la fila con equipos == "TOT"
+  ) %>% 
+  ungroup()
+
+length(unique(nba_unique$Jugador)) # número de jugadores únicos
+```
+Se han seleccionado los jugadores de forma correcta, vamos a realizar el mismo planteamiento que antes. Cuanto más juega un jugador, más puntos debería anotar. Sin embargo, esto no siempre es cierto: hay jugadores que, aunque disputen muchos minutos, tienen un rol más pasador o defensivo, y otros que, jugando poco, son extremadamente eficientes ofensivamente.
+Por lo tanto, es importante tener en cuenta el número de minutos jugados y los puntos anotados por partido para evaluar el rendimiento de un jugador.
+Calculamos las estadísticas por minuto real, y ponderaremos por minutos jugados por partido con la función log(x+1) de manera que demos más peso a los que más minutos juegan sin exagerlo. Con esto conseguimos que los jugadores que son muy productivos pero apenas juegan ya no se inflan y será una mejor escala para el PCA.
+
+
+```{r Transformación columnas nba_unique } 
+names(nba_unique) <- gsub("\\.", "_", tolower(names(nba_unique)))
+head(nba_unique)
+```
+```{r CSV datos unificados}
+write.csv(nba_unique, "nba_2022_2023_unificado.csv", row.names = FALSE)
+```
+
+# Escalado de datos
+
+```{r Escalado de datos reales }
+
+# Creamos una nueva versión del dataset con variables ajustadas
+
+
+nba_ajustado <- nba_unique %>%
+  mutate(
+    # Tiros de campo
+    tiros_anotados_aj = (tiros_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tiros_intentados_aj = (tiros_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Triples
+    triples_anotados_aj = (triples_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tripes_intentados_aj = (tripes_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Tiros de 2 puntos
+    tiros_2_anotados_aj = (tiros_de_2_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tiros_2_intentados_aj = (tiros_de_2_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Tiros libres
+    tl_anotados_aj = (tl_anotados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tl_intentados_aj = (tl_intentados_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Rebotes
+    ro_aj = (ro_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    rd_aj = (rd_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    rebotes_aj = (rebotes_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Distribución
+    asistencias_aj = (asistencias_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Defensa activa
+    robos_aj = (robos_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    tapones_aj = (tapones_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Errores y faltas
+    perdidas_aj = (perdidas_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    faltas_aj = (faltas_pp / minutos_por_partido) * log1p(minutos_por_partido),
+    
+    # Producción ofensiva total
+    puntos_aj = (puntos_pp / minutos_por_partido) * log1p(minutos_por_partido)
+  )%>% 
+  
+   select(jugador,
+         edad,
+         posicion,
+         all_stars, partidos_jugados,
+         partidos_titular,
+         ends_with("_aj"))
+
+
+```
+
+```{r Distribuciones de las variables ajustadas }
+
+# Carpeta donde guardar las imágenes (puedes cambiarla)
+dir.create("histos_nba", showWarnings = FALSE)
+
+# 1. Extraer la lista de variables numéricas
+num_vars <- nba_ajustado %>% 
+  select(where(is.numeric)) %>% 
+  names()
+
+# 2. Bucle: un histograma por variable
+for (v in num_vars) {
+  
+  p <- ggplot(nba_ajustado, aes(x = .data[[v]])) +
+         geom_histogram(bins = 30, fill = "steelblue", colour = "white") +
+         theme_minimal(base_size = 14) +
+         labs(title = paste("Distribución de", v),
+              x = NULL, y = "Frecuencia")
+  
+  # 3. Guardar como PNG (300 dpi) dentro de /histos_nba
+  ggsave(filename = paste0("histos_nba/", v, ".png"),
+         plot     = p,
+         width    = 5, height = 4, dpi = 300)
+}
+cat(length(num_vars), "histogramas guardados en la carpeta 'histos_nba'\n")
+
+
+```
+
+# Limpieza de datos
+
+```{r Caja de bigotes de las variables ajustadas }
+library(dplyr)
+library(ggplot2)
+
+# Carpeta destino
+dir.create("boxplots_nba", showWarnings = FALSE)
+
+# Vector con las columnas *_aj
+aj_vars <- nba_ajustado %>% 
+  select(ends_with("_aj")) %>% 
+  names()
+
+# Bucle: un PNG por variable
+for (v in aj_vars) {
+  
+  # --- 1. Calcular límites del boxplot (sin dibujar) --------------
+  stats <- boxplot(nba_ajustado[[v]], plot = FALSE)$stats
+  q1  <- stats[2]          # primer cuartil
+  q3  <- stats[4]          # tercer cuartil
+  iqr <- q3 - q1
+  low  <- q1 - 1.5 * iqr   # límite inferior de bigote
+  high <- q3 + 1.5 * iqr   # límite superior de bigote
+  
+  # --- 2. Filas que son outliers en esta variable -----------------
+  out_df <- nba_ajustado %>% 
+    filter(.data[[v]] < low | .data[[v]] > high) %>% 
+    select(jugador, !!v := all_of(v))
+  
+  # --- 3. Construir el boxplot con etiquetas si procede -----------
+  p <- ggplot(nba_ajustado, aes(x = "", y = .data[[v]])) +
+         geom_boxplot(fill = "skyblue", outlier.colour = "red") +
+         theme_minimal(base_size = 14) +
+         labs(title = paste("Boxplot de", v),
+              x = NULL, y = "Valor ajustado")
+  
+  # Añadir etiquetas solo si hay outliers
+  if (nrow(out_df) > 0) {
+    p <- p +
+      geom_text(data = out_df,
+                aes(label = jugador, y = .data[[v]]),
+                x = 1.1,                # ligeramente a la derecha de la caja
+                hjust = 0,
+                size = 3.3, colour = "darkred")
+  }
+  
+  # --- 4. Guardar el gráfico --------------------------------------
+  ggsave(filename = paste0("boxplots_nba/", v, ".png"),
+         plot     = p,
+         width    = 4.5, height = 5, dpi = 300)
+}
+
+cat(length(aj_vars), "boxplots generados con etiquetas de outliers en 'boxplots_nba/'\n")
+```
+
+```{r Datos anómalos de las variables ajustadas }
+library(dplyr)
+library(purrr)
+
+# 1. Variables *_aj
+aj_vars <- nba_ajustado %>%
+  select(ends_with("_aj")) %>%
+  names()
+
+# 2. Función para detectar outliers
+outlier_iqr <- function(df, var) {
+  x   <- df[[var]]
+  q1  <- quantile(x, 0.25, na.rm = TRUE)
+  q3  <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  low  <- q1 - 1.5 * iqr
+  high <- q3 + 1.5 * iqr
+  
+  df %>%
+    filter(x < low | x > high) %>%
+    mutate(variable = var) %>%
+    select(jugador, all_stars, partidos_jugados, variable)
+}
+
+# 3. Lista con los outliers por variable
+outliers_list <- map(aj_vars,
+                     ~ outlier_iqr(nba_ajustado, .x)) %>%
+                 set_names(aj_vars)
+
+# 4. Combinar todos en un único data frame
+outliers_total <- bind_rows(outliers_list)
+
+# 5. Filtrar solo los que tienen <10 partidos jugados
+outliers_menos_10 <- outliers_total %>%
+  filter(partidos_jugados < 10) %>%
+  distinct()
+
+# 6. Mostrar resultados en consola
+for (v in aj_vars) {
+  cat("\n📊", v, ":\n", sep = "")
+  df_var <- outliers_list[[v]]
+  if (nrow(df_var) == 0) {
+    cat("  —  Sin outliers según IQR\n")
+  } else {
+    for (i in 1:nrow(df_var)) {
+      cat("   -", df_var$jugador[i],
+          "| All-Star:", df_var$all_stars[i],
+          "| Partidos jugados:", df_var$partidos_jugados[i], "\n")
+    }
+  }
+}
+
+# 7. Ver los outliers con < 10 partidos
+cat("\n📌 Jugadores anómalos con menos de 10 partidos:\n")
+print(outliers_menos_10)
+
+
+```
+
+Tras revisar la mayoría de anómalos se han visto que los jugadores anómalos en alguna variable y tienen muchos partidos es muy probable que hayan ido al all stars, por lo que se ha decidido dejarlos, luego hay jugadores con pocos partidos que salen como anómalos en los sentidos, aunque se haya ajustado los valores de dichos valores pensamos que en menos de 8 partidos un jugador no puede demostrar como es en realidad, se deciden eliminar estos anómalos y valorar de nuevo los anómalos. 
+
+
+```{r}
+nba_limpio_ajustado <- nba_ajustado %>%
+  filter(!jugador %in% outliers_menos_10$jugador)
+
+cat(nrow(nba_ajustado) - nrow(nba_limpio_ajustado), "jugadores eliminados\n")
+```
+```{r Escalado de datos }
+library(dplyr)
+
+
+# 1. Variables *_aj
+aj_vars <- nba_limpio_ajustado %>%
+  select(ends_with("_aj")) %>%
+  names()
+
+# 2. Función para detectar outliers
+outlier_iqr <- function(df, var) {
+  x   <- df[[var]]
+  q1  <- quantile(x, 0.25, na.rm = TRUE)
+  q3  <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  low  <- q1 - 1.5 * iqr
+  high <- q3 + 1.5 * iqr
+  
+  df %>%
+    filter(x < low | x > high) %>%
+    mutate(variable = var) %>%
+    select(jugador, all_stars, partidos_jugados, variable)
+}
+
+# 3. Lista con los outliers por variable
+outliers_list <- map(aj_vars,
+                     ~ outlier_iqr(nba_limpio_ajustado, .x)) %>%
+                 set_names(aj_vars)
+
+# 4. Combinar todos en un único data frame
+outliers_total <- bind_rows(outliers_list)
+
+# 5. Filtrar solo los que tienen <10 partidos jugados
+outliers_menos_10 <- outliers_total %>%
+  filter(partidos_jugados < 10) %>%
+  distinct()
+
+# 6. Mostrar resultados en consola
+for (v in aj_vars) {
+  cat("\n📊", v, ":\n", sep = "")
+  df_var <- outliers_list[[v]]
+  if (nrow(df_var) == 0) {
+    cat("  —  Sin outliers según IQR\n")
+  } else {
+    for (i in 1:nrow(df_var)) {
+      cat("   -", df_var$jugador[i],
+          "| All-Star:", df_var$all_stars[i],
+          "| Partidos jugados:", df_var$partidos_jugados[i], "\n")
+    }
+  }
+}
+
+
+
+```
+No se ven anómalos con pocos partidos, los que tenemos son de mucho partidos y se han decido dejarlos. 
+
+```{r}
+length(nba_limpio_ajustado$jugador)
+```
+Tras la limpieza se han quedado 508 jugadores 
+
+```{r CSV datos ajustados limpios}
+write.csv(nba_limpio_ajustado, "nba_2022_2023_ajustado_limpio.csv", row.names = FALSE)
+```
+
+
+

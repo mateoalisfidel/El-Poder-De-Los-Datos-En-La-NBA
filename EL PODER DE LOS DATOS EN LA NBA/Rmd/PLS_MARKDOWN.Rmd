@@ -1,0 +1,393 @@
+---
+title: "PLS"
+author: "Mateo Alís Fidel"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(
+  echo  = FALSE,   # no muestra el código
+  cache = TRUE,    # sigue cacheando los resultados
+  message = FALSE, # opcional: oculta mensajes de paquetes
+  warning = FALSE  # opcional: oculta warnings
+)
+
+# Paquete ropls para PLS/PLS-DA
+library(ropls)
+# Librerías para visualizaciones
+library(viridis)    # para paleta de colores
+library(patchwork)  # para combinar ggplots
+library(dplyr)      # para manipulación de tablas
+library(ggplot2)    # para gráficos con grammar of graphics
+library(ggrepel)    # para etiquetas en ggplot2
+
+```
+
+
+```{r Preparacion de datos }
+# Para particionar y balancear clases
+if (!requireNamespace("caret", quietly = TRUE)) install.packages("caret")
+library(caret)
+
+# ------------------------------------------------------------
+# 1) LECTURA Y PREPARACIÓN DE DATOS
+# ------------------------------------------------------------
+nba <- read.csv("nba_pca.csv", stringsAsFactors = FALSE)
+names(nba) <- trimws(names(nba))  # limpiar espacios en los nombres
+
+# Convertir all_stars a factor con niveles "No"/"Sí"
+nba$all_stars <- factor(nba$all_stars,
+                        levels = c(0, 1),
+                        labels = c("No", "Sí"))
+
+# Seleccionar solo columnas numéricas (excluyendo all_stars)
+vars_num <- nba %>%
+  select(-all_stars) %>%
+  select(where(is.numeric)) %>%
+  names()
+
+X <- nba[, vars_num]
+y <- nba$all_stars
+```
+
+````{r}
+# Conteo absoluto de cada clase en todo el dataset
+conteo_total <- table(nba$all_stars)
+print(conteo_total)
+
+prop_total <- prop.table(conteo_total)
+print(prop_total)
+````
+Con 480 “No” frente a 28 “Sí” en tu conjunto de entrenamiento, la proporción original es de casi 17:1 (unos 5 % de All-Stars). Si llevas directamente a 1:1, tendrías que replicar casi 452 jugadores All-Star (28→480), con el riesgo de sobreajustar el modelo a muy pocas observaciones genuinas de “Sí”. Por eso conviene elegir un balance intermedio que aumente la representación de All-Stars sin inflar en exceso la muestra mediante duplicados idénticos.
+
+Un ratio de 2:1 (“dos No” por cada “Sí”) supone apuntar a unos 240 All-Stars en lugar de 28 (porque 480/2 ≈ 240), de modo que tendrás que duplicar 212 casos de “Sí” (240 − 28). En la práctica, esto crea un total de 720 observaciones (480 No + 240 Sí). Con este grado de upsampling, el modelo PLS-DA ve a un tercio de la muestra como All-Stars, lo cual es suficiente para que aprenda los patrones característicos de esos jugadores sin recurrir a millones de copias idénticas.
+
+En el contexto de la NBA, donde los All-Stars representan una minoría muy reducida pero de gran importancia (sueles querer detectarlos con alta sensibilidad), un ratio 2:1 ofrece un buen compromiso: mejora la capacidad del modelo para identificar rasgos distintivos de All-Stars sin sacrificar tanta variabilidad como para sobreajustar. Si tras esto observas todavía demasiado sesgo (por ejemplo, muchos falsos positivos o falsos negativos), podrías experimentar también con un 3:1 (duplicar 132 veces de “Sí” para llegar a 160 All-Stars) y comparar métricas como la sensibilidad y precisión en validación cruzada.
+
+```{r dividir train y test}
+# ------------------------------------------------------------
+# 2) DIVIDIR ENTRE ENTRENAMIENTO Y TEST
+# ------------------------------------------------------------
+set.seed(42)
+train_idx <- createDataPartition(y, p = 0.7, list = FALSE)
+
+X_train <- X[train_idx, ]
+X_test  <- X[-train_idx, ]
+y_train <- y[train_idx]
+y_test  <- y[-train_idx]
+```
+
+Aquí garantizamos que el conjunto X_test/y_test siga siendo “puro”, con la proporción original de “No” vs. “Sí”.
+
+```{r UPsampling}
+# ------------------------------------------------------------
+# 3) UPSAMPLING PARCIAL EN EL CONJUNTO DE ENTRENAMIENTO
+# ------------------------------------------------------------
+# Queremos una proporción aproximada de 2:1 (dos No por cada Sí)
+tabla_orig <- table(y_train)
+n_no <- tabla_orig["No"]
+n_si <- tabla_orig["Sí"]
+
+# Objetivo: duplicar los Sí hasta que haya aproximadamente n_no / 2
+target_si <- round(n_no / 2)
+n_to_dup <- max(0, target_si - n_si)
+
+# Índices de los ejemplos "Sí"
+idx_si <- which(y_train == "Sí")
+
+# Si no hay suficientes "Sí" para duplicar, repetimos con reemplazo
+set.seed(42)
+dup_idxs <- sample(idx_si, size = n_to_dup, replace = TRUE)
+
+# Construimos X_train_parcial y y_train_parcial
+X_train_parcial <- rbind(X_train, X_train[dup_idxs, ])
+y_train_parcial <- factor(c(as.character(y_train), rep("Sí", n_to_dup)),
+                          levels = c("No", "Sí"))
+
+# Verificamos proporción final
+# table(y_train_parcial)  # Debería mostrar aproximadamente 2:1 (No:Sí)
+```
+
+Así construimos X_train_parcial y y_train_parcial con un ratio aproximado 2:1 (“No” : “Sí”).
+
+```{r Estimación del modelo y optimización del número de componentes}
+# ------------------------------------------------------------
+# 4) AJUSTAR PLS-DA SOBRE DATOS BALANCEADOS PARCIALMENTE
+# ------------------------------------------------------------
+set.seed(42)
+myplsda_bal <- opls(
+  x         = X_train_parcial,
+  y         = y_train_parcial,
+  predI     = 10,          # prueba hasta 10 componentes
+  crossvalI = 10,          # validación cruzada 10‐fold interna
+  scaleC    = "standard",  # escala X automáticamente
+  fig.pdfC = "none" 
+)
+
+```
+````{r}
+maxNC = 10
+plot(1:maxNC, myplsda_bal@modelDF$`R2Y(cum)`, type = "o", pch = 16, col = "blue3",
+     lwd = 2, xlab = "Components", ylab = "", ylim = c(0.4,0.8),
+     main = "PLS-DA model: NBA")
+lines(1:maxNC, myplsda_bal@modelDF$`Q2(cum)`, type = "o", pch = 16, col = "red3",
+      lwd = 2)
+abline(h = 0.5, col = "red3", lty = 2)
+legend("bottomleft", c("R2Y", "Q2"), lwd = 2, 
+       col = c("blue3", "red3"), bty = "n")
+
+````
+
+En este contexto, elegir cinco componentes Latentes resulta adecuado porque a partir de la tercera componente la ganancia en R²Y se estabiliza cerca de 0.68–0.70 y el valor de Q² comienza a descender levemente. Al seleccionar cinco componentes comprobamos que tenemos un alto poder explicativo (R²Y) sin sacrificar significativamente la capacidad predictiva (Q²), evitando así sobreajustar el modelo mientras capturamos la mayor varianza útil para discriminar All-Stars.
+
+```{r}
+set.seed(42)
+myplsda_bal <- opls(
+  x         = X_train_parcial,
+  y         = y_train_parcial,
+  predI     = 3,          # prueba hasta 5 componentes
+  crossvalI = 10,          # validación cruzada 10‐fold interna
+  scaleC    = "standard",  # escala X automáticamente            
+)
+```
+En el primer panel comparo los valores de R²Y y Q² conforme aumento de 1 a 5 componentes. Observo que R²Y crece rápidamente con las dos primeras componentes y se estabiliza cerca de 0.68–0.70 a partir de la tercera, mientras que Q² alcanza su valor máximo (≈0.66) en la segunda o tercera y luego comienza a descender levemente. Esto me indica que con cinco componentes sigo explicando buena parte de la variabilidad en la dicotomía All-Star/no All-Star sin sacrificar capacidad predictiva ni incurrir en sobreajuste importante.
+
+En el gráfico de permutaciones, cada punto gris corresponde a un modelo ajustado tras permutar aleatoriamente las etiquetas. Las líneas negras marcan mis valores reales de R²Y y Q² (alrededor de 0.65). Dado que casi ningún modelo permutado alcanza esos niveles, concluyo que la relación entre las estadísticas de los jugadores y ser All-Star no es fruto del azar, sino significativa (p = 0.05), lo que refuerza la validez de mi modelo.
+
+En el tercer panel, trazo para cada jugador su distancia en el espacio de scores (SD) contra la distancia ortogonal al modelo (OD), coloreando en azul a los no All-Stars y en rojo a los All-Stars. Las líneas punteadas establecen umbrales de corte para detectar posibles outliers. Veo que casi todos los puntos quedan dentro de esos límites, lo que me indica que no hay casos atípicos extremos y que los perfiles estadísticos de los jugadores (tanto All-Stars como no All-Stars) se ajustan bien al espacio latente definido por el PLS-DA.
+
+Por último, en el score plot de las dos primeras componentes (t₁ vs. t₂), distingo claramente que los All-Stars (rojo) tienden a tomar valores altos de t₁, mientras que los no All-Stars (azul) se agrupan más a la izquierda. Las elipses de confianza de cada grupo refuerzan esta separación. Además, los indicadores globales (R²X = 0.841, R²Y = 0.684, Q² = 0.654) reflejan que el modelo capta gran parte de la variabilidad de las variables predictoras y discrimina eficazmente quiénes son All-Stars según sus estadísticas de juego.
+
+
+```{r}
+plot(x = myplsda_bal,
+     typeVc       = "x-loading",
+     parCompVi     = c(1, 2),
+     parPaletteVc  = NA,
+     parTitleL     = TRUE,
+     parCexMetricN = 0.8)
+
+```
+
+En este diagrama de loadings vemos cómo cada estadística de jugador se proyecta sobre las dos primeras componentes latentes: la primera (p1, 42 %) agrupa variables ofensivas fuertes como “tl_intentos_aj”, “puntos” y “perdidas_aj”, lo que indica que los All-Stars suelen tener alto volumen de tiro y anotación (y, por la agresividad ofensiva, más pérdidas), mientras que “asistencias_aj” y “partidos_titular” también cargan positivamente en p1, señalando que estar de titular y repartir asistencias caracterizan ese perfil. La segunda componente (p2, 7 %) resalta acciones defensivas (“robos_aj”, “tapones_aj”) en valores positivos, diferenciando a los jugadores que, además de anotar, aportan robos y bloqueos. En conjunto, estos loadings muestran que los All-Stars se distinguen tanto por su impacto ofensivo (p1) como por contribuciones defensivas (p2).
+
+
+````{r}
+# ------------------------------------------------------------
+# Relación lineal t vs u para las tres primeras componentes
+# ------------------------------------------------------------
+
+# Extraer los scores de X (T) y de Y (U) del modelo PLS‐DA
+T_mat <- myplsda_bal@scoreMN    # matriz n × A (A ≥ 3)
+U_mat <- myplsda_bal@uMN        # matriz n × A
+
+# Calcular las correlaciones t_i vs u_i para i = 1, 2, 3
+cors <- sapply(1:3, function(i) cor(T_mat[, i], U_mat[, i]))
+names(cors) <- paste0("Comp", 1:3)
+print(cors)
+# Ejemplo de salida:
+#  Comp1  Comp2  Comp3 
+#  0.812  0.429  0.187 
+
+# Dibujar un scatter‐plot t_i vs u_i para cada componente (1–3)
+par(mfrow = c(1, 3), mar = c(4, 4, 2, 1))
+
+for (i in 1:3) {
+  plot(
+    T_mat[, i], U_mat[, i],
+    xlab = paste0("t (Componente ", i, ")"),
+    ylab = paste0("u (Componente ", i, ")"),
+    main = paste0("Component ", i, " (r = ", round(cors[i], 3), ")"),
+    pch  = 16, col = "red3"
+  )
+  abline(a = 0, b = 1, col = "grey", lty = 3)
+}
+
+# Restaurar parámetros gráficos por defecto (opcional)
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2) + 0.1)
+
+````
+
+La Componente 1 es la que mejor discrimina la clase; quienes obtienen valores altos de t1 se proyectan en un u1 alto (grupo All-Star), y quienes tienen t1 bajo se ubican en u1 bajo (No All-Star).
+
+La Componente 2 aporta información adicional de discriminación (más suavemente), detectando matices que no quedaron en t1, pero no es tan potente para clasificar por sí sola.
+
+La Componente 3 ya no es relevante para separar las clases; solo matiza pequeñas diferencias residuales que no capturaron las dos primeras componentes.
+````{r}
+# VIP scores (vector nombrado)
+vip_scores <- myplsda_bal@vipVn
+vip_scores
+
+# -----------------------------------------------
+# 2) GRAFICAR VIP SCORES COMO BARRAS ORDENADAS
+# -----------------------------------------------
+
+library(dplyr)
+library(ggplot2)
+
+# Convertir a data.frame y ordenar
+vip_df <- data.frame(
+  Variable = names(vip_scores),
+  VIP      = as.numeric(vip_scores),
+  row.names = NULL
+) %>%
+  arrange(desc(VIP))
+
+# Asegurarse de que el factor respete el orden
+vip_df$Variable <- factor(vip_df$Variable, levels = vip_df$Variable)
+
+# Gráfico de barras horizontal con línea de VIP = 1
+ggplot(vip_df, aes(x = Variable, y = VIP)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(
+    title = "VIP Scores del modelo PLS-DA",
+    x = "Variable",
+    y = "VIP"
+  ) +
+  theme_minimal(base_size = 12)
+````
+
+Las variables con VIP > 1 (“puntos_aj”, “tl_intentos_aj”, “perdidas_aj”, “partidos_titular” y “asistencias_aj”) son claramente las más relevantes para distinguir All-Stars de no All-Stars. “puntos_aj” (≈ 1.53) y “tl_intentos_aj” (≈ 1.44) reflejan que el volumen de anotación y la agresividad ofensiva—más intentos de tiro generando pérdidas (“perdidas_aj” ≈ 1.22) son rasgos distintivos de un All-Star. Además, figurar como “partidos_titular” (≈ 1.30) y repartir “asistencias_aj” (≈ 1.05) señalan el rol de líder en la cancha, típico de quienes reciben votos o son vistos como piezas clave en su equipo.
+
+Por debajo del umbral VIP = 1, variables como “rd_aj” (rebotes), “tripes_intentados_aj” y los atributos defensivos (“robos_aj”, “tapones_aj”) aportan menos fuerza predictiva. Esto indica que, si bien el juego interior y la defensa son valiosos en la NBA, el modelo PLS-DA asigna mayor peso a métricas ofensivas y de participación directa en el ataque para determinar si un jugador alcanza el estatus de All-Star.
+
+````{r}
+# ------------------------------------------------------------
+# 3.5 Medidas del error en PLS-DA para el conjunto de entrenamiento
+# ------------------------------------------------------------
+
+# 1) Generar predicciones sobre el conjunto de entrenamiento balanceado
+#    Usamos el modelo 'myplsda_bal' y las mismas variables X_train_parcial
+mypred_train <- predict(myplsda_bal, newdata = X_train_parcial)
+
+# 2) Cargar el paquete caret (si no está instalado: install.packages("caret"))
+library(caret)
+
+# 3) Calcular la matriz de confusión y métricas de clasificación
+#    Indicamos que la clase “Sí” es la positiva (All-Star)
+cm_train <- confusionMatrix(mypred_train, y_train_parcial, positive = "Sí")
+
+# 4) Mostrar resultados
+print(cm_train)
+
+````
+Podemos ver buen ajuste en entrenamiento: Con un 93.45 % de accuracy y balanced accuracy de ~93 %, el modelo aprende a distinguir correctamente en su propio conjunto de entrenamiento tanto All-Stars como No‐All-Stars.
+
+Sin embargo, hay que tener cuidado de sobreajuste: Estos valores provienen del mismo conjunto con el que entrenamos (upsampleado). Para verificar que el modelo no está memorizando patrones del train, hay que corroborar su desempeño sobre el conjunto de test original (sin duplicados).
+
+En resumen, el resultado en entrenamiento es muy prometedor, pero la verdadera prueba de generalización vendrá al aplicar exactamente el mismo procedimiento (predict + confusionMatrix) sobre X_test y y_test. Allí comprobaremos si la alta sensibilidad y especificidad se mantienen o si caen de forma significativa, lo que indicaría sobreajuste.
+
+````{r}
+# ------------------------------------------------------------
+# 3.5 Medidas del error en PLS-DA para el conjunto de entrenamiento
+# ------------------------------------------------------------
+
+# 1) Generar predicciones sobre el conjunto de entrenamiento balanceado
+#    Usamos el modelo 'myplsda_bal' y las mismas variables X_train_parcial
+mypred_test <- predict(myplsda_bal, newdata = X_test)
+
+# 2) Cargar el paquete caret (si no está instalado: install.packages("caret"))
+library(caret)
+
+# 3) Calcular la matriz de confusión y métricas de clasificación
+#    Indicamos que la clase “Sí” es la positiva (All-Star)
+cm_test <- confusionMatrix(mypred_test, y_test, positive = "Sí")
+
+# 4) Mostrar resultados
+print(cm_test)
+
+````
+En resumen, en test el modelo no pierde ningún All-Star (sensibilidad perfecta), pero “paga el precio” de incluir algunos no All-Stars como falsos positivos, resultando en una precisión moderada sobre los “Sí” predichos. Estos falsos positivos se podrian considerar all-stars en el caso en el que el criterio de los entrenadores/periodistas basados en las estadisticas tuviera el 100% del peso en la votacion. En realidad esta votacion se realiza al 50% entre entrenadores/periodistas y el voto del publico. Por ello nuestro modelo al tener solamente en cuenta las estadisticas, los jugadores que predecimos si que podrian ser consiferados all star, pero debido a los fans de los equipos y sus jugadores votan por fanatismo y no por meritocracia decantando la balanza por los jugadores mas mediaticos.
+
+````{r}
+# ------------------------------------------------------------
+# MATRICES DE CONFUSIÓN LADO A LADO (TRAIN y TEST)
+# ------------------------------------------------------------
+
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(patchwork)
+
+# 1) Preparar datos para TRAIN
+pred_labels_train <- predict(myplsda_bal, newdata = X_train_parcial)
+conf_matrix_train <- table(
+  Verdadero = y_train_parcial,
+  Predicho  = pred_labels_train
+)
+cfm_df_train <- as.data.frame(conf_matrix_train) %>%
+  rename(
+    ClaseVerdadera = Verdadero,
+    ClasePredicha  = Predicho,
+    Frecuencia     = Freq
+  )
+
+# 2) Preparar datos para TEST
+pred_labels_test <- predict(myplsda_bal, newdata = X_test)
+conf_matrix_test <- table(
+  Verdadero = y_test,
+  Predicho  = pred_labels_test
+)
+cfm_df_test <- as.data.frame(conf_matrix_test) %>%
+  rename(
+    ClaseVerdadera = Verdadero,
+    ClasePredicha  = Predicho,
+    Frecuencia     = Freq
+  )
+
+# 3) Crear ggplot para TRAIN
+p_train <- ggplot(cfm_df_train, aes(x = ClasePredicha, y = ClaseVerdadera, fill = Frecuencia)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Frecuencia), size = 5) +
+  scale_fill_viridis(option = "D") +
+  labs(
+    title = "Train: Matriz de Confusión",
+    x     = "Predicción",
+    y     = "Real"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title   = element_text(hjust = 0.5, face = "bold"),
+    axis.text    = element_text(size = 12),
+    axis.title   = element_text(size = 14)
+  )
+
+# 4) Crear ggplot para TEST
+p_test <- ggplot(cfm_df_test, aes(x = ClasePredicha, y = ClaseVerdadera, fill = Frecuencia)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Frecuencia), size = 5) +
+  scale_fill_viridis(option = "D") +
+  labs(
+    title = "Test: Matriz de Confusión",
+    x     = "Predicción",
+    y     = "Real"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title   = element_text(hjust = 0.5, face = "bold"),
+    axis.text    = element_text(size = 12),
+    axis.title   = element_text(size = 14)
+  )
+
+# 5) Combinar ambos gráficos uno al lado del otro
+p_train + p_test + plot_layout(ncol = 2)
+
+
+````
+
+El PLS‐DA entrenado con un upsampling parcial 2:1 consigue discriminar eficazmente a los All‐Stars de la NBA basándose principalmente en variables ofensivas de alto impacto. Tras duplicar suficientes muestras de la clase minoritaria (“Sí”) para aproximar una proporción 2:1, el modelo no queda sesgado hacia la clase mayoritaria y aprende patrones relevantes. Los VIP scores resaltan que “puntos_aj” e “intentos de tiro” lideran la importancia (VIP > 1.4), seguidos de “perdidas_aj”, “partidos_titular” y “asistencias_aj” (VIP > 1). Esto confirma que los All‐Stars se definen sobre todo por su volumen de anotación y protagonismo ofensivo.
+
+En cuanto a la elección de componentes latentes, las dos primeras concentran casi toda la información útil:
+
+La Componente 1 (42 % de R²X) separa claramente All‐Stars y no All‐Stars (correlación con Y ≈ 0.79).
+
+La Componente 2 añade un matiz adicional (correlación ≈ 0.36), capturando covarianza residual.
+Componentes posteriores caen drásticamente en correlación con Y (< 0.2), por lo que 2–3 componentes son suficientes para maximizar predicción y evitar sobreajuste.
+
+En entrenamiento, el modelo alcanza una balanced accuracy ~ 93 % (sensibilidad ≈ 92 %, especificidad ≈ 94 %), sin outliers significativos según T²‐Hotelling y SCR. En test, detecta el 100 % de los All‐Stars reales y clasifica correctamente el 95 % de los no All‐Stars (sensibilidad = 1.0, especificidad ≈ 0.95), si bien introduce varios falsos positivos (reduciendo el Positive Predictive Value a ~ 53 %). Estos resultados muestran buena generalización: el modelo no pierde ningún All‐Star en test y mantiene alta exactitud global, aunque sacrifica precisión al predecir “Sí” para no incurrir en falsos negativos.

@@ -1,0 +1,326 @@
+---
+title: "Clustering_Mateo"
+author: "Mateo Alís Fidel"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo  = FALSE,   # no muestra el código
+  cache = TRUE,    # sigue cacheando los resultados
+  message = FALSE, # opcional: oculta mensajes de paquetes
+  warning = FALSE  # opcional: oculta warnings
+)
+library(knitr)
+library(cluster)
+library(FactoMineR)
+library(factoextra)
+library(NbClust)
+library(clValid)
+library(tidyverse)
+```
+
+```{r}
+load("nba_pca.RData", verbose = TRUE)
+```
+
+El objetivo de realizar un clustering con jugadores de la NBA es identificar sustitutos que no solo igualen el perfil estadístico, sino que también cuenten con la madurez, consistencia y nivel de responsabilidad. Por ello, hemos decidido otorgar un mayor peso a las variables partidos_jugados, partidos_titular y all-star.
+
+Suponemos que un General Manager de la NBA quiere incorporar a un jugador que sea pieza clave de su equipo, pero bien por que el jugador cobra mucho dinero en la agencia libre o bien porque no han conseguido lograr un traspaso con su equipo no lo pueden traer.
+El GM debe tener otras alternativas que no desvarien mucho de sus pensamientos y para ello realizamos el clustering para ver jugadores que tengan perfiles similares.
+Esta estrategia de ponderación se alinea con el rol de General Manager, minimizar el riesgo de incorporar perfiles junior sin recorrido y asegurar que el candidato seleccionado aporte tanto en producción estadística como en veteranía y liderazgo desde el primer momento.
+
+Vamos a utilizar el dataset nba_pca que ha sido utilizado a la hora de realizar el PCA.
+
+```{r}
+rownames(nba_pca) <- nba_pca$jugador
+nba_pca$Jugador  <- NULL
+
+# Seleccionar solo variables numéricas para clustering
+df_num <- nba_pca %>% select(where(is.numeric))
+
+```
+
+
+Se utilizará una medida de distancia basada en la distancia de Manhattan, ya que al sumar diferencialmente las discrepancias absolutas en cada estadística (puntos, asistencias, rebotes, experiencia, titularidades), nos ofrece un coste de sustitución lineal y completamente desglosable. Por ejemplo, si dos jugadores difieren en 2 asistencias y 3 rebotes, su distancia aumentará exactamente en 5 unidades. De esta forma la agrupación que se haga nos benefícia al buscar jugadores que tengan un estilo de juego muy similar.
+
+Además, utilizando la distancia de Manhattan, nos permite ponderar fácilmente la veteranía o el rol de titular (dejando esas columnas sin escalar o multiplicándolas por un factor) para priorizar candidatos con minutos y liderazgo probados, alineándose perfectamente con el objetivo de hallar sustitutos estadísticos y estratégicos.
+
+De otras formas, se había probado a realizar el clustering con la distancia euclídea, la de pearson, etc. Para nuestro caso y como mejor nos salia el análisis al final optamos por escoger la distancia de Manhattan. Ya que si hemos conseguído el objetivo deseado, que utilizando otras medidas quizá no hubieramos logrado o se hubiera logrado pero no de igual manera.
+
+```{r}
+# 1) Calcula la matriz de distancias Manhattan
+midist <- dist(df_num, method = "manhattan")
+
+# 2) Visualiza la matriz de distancias
+fviz_dist(
+  midist,
+  show_labels = TRUE,
+  lab_size    = 0.3,
+  gradient    = list(low = "#00AFBB", mid = "white", high = "#FC4E07")
+) +
+  labs(title = "Distancia Manhattan entre jugadores")
+```
+
+El mapa de color nos muestra que los jugadores se agrupan es diversos grupos, que es lo que buscamos.
+
+Modelos jerárquicos
+En primer lugar, aplicaremos modelos jerárquicos, utilizando el método de Ward, el método de la media y el de k-medoides. Empezaremos por estimar el número óptimo de clusters:
+
+```{r ward-validation, fig.width=7, fig.height=4, warning=FALSE}
+library(factoextra)
+library(gridExtra)
+# Ward jerárquico (hcut) — Silhouette y WSS
+p1 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = hcut,
+  method     = "silhouette",
+  hc_method  = "ward.D2",
+  k.max      = 10,
+  diss       = midist,
+  verbose    = FALSE
+) + labs(title = "Ward (silhouette)")
+
+p2 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = hcut,
+  method     = "wss",
+  hc_method  = "ward.D2",
+  k.max      = 10,
+  diss       = midist,
+  verbose    = FALSE
+) + labs(title = "Ward (WSS)")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+```{r kmeans-validation, fig.width=7, fig.height=4, warning=FALSE}
+# K-means — Silhouette y WSS
+p3 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = kmeans,
+  method     = "silhouette",
+  k.max      = 10,
+  verbose    = FALSE
+) + labs(title = "K-means (silhouette)")
+
+p4 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = kmeans,
+  method     = "wss",
+  k.max      = 10,
+  verbose    = FALSE
+) + labs(title = "K-means (WSS)")
+
+grid.arrange(p3, p4, ncol = 2)
+
+```
+```{r pam-validation, fig.width=7, fig.height=4, warning=FALSE}
+# K-medoides (PAM) — Silhouette y WSS
+p5 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = pam,
+  method     = "silhouette",
+  k.max      = 10,
+  verbose    = FALSE
+) + labs(title = "PAM (silhouette)")
+
+p6 <- fviz_nbclust(
+  x          = df_num,
+  FUNcluster = pam,
+  method     = "wss",
+  k.max      = 10,
+  verbose    = FALSE
+) + labs(title = "PAM (WSS)")
+
+grid.arrange(p5, p6, ncol = 2)
+
+```
+```{r silhouette-comparison, fig.width=9, fig.height=4, warning=FALSE, message=FALSE}
+library(cluster)
+library(ggsci)   # para pal_npg
+
+# --- 1) Calcula los tres clusterings a k = 4 (o el que necesites) ---
+k <- 10
+
+# Ward jerárquico
+clust1  <- hclust(midist, method = "ward.D2")
+grupos1 <- cutree(clust1, k = k)
+
+# K-means sobre df_num
+set.seed(42)
+km_res  <- kmeans(df_num, centers = k, nstart = 25)
+
+# PAM (K-medoides) sobre df_num
+pam_res <- pam(df_num, k = k)
+
+# --- 2) Define paletas de color ---
+colores_wk <- pal_npg("nrc")(k)
+colores_km <- pal_npg("nrc")(k)
+colores_pm <- pal_npg("nrc")(k)
+
+# --- 3) Grafica las siluetas en 1×3 ---
+par(mfrow = c(1, 3), mar = c(4, 4, 3, 1))
+
+# 1) Silueta Ward
+plot(
+  silhouette(grupos1, midist),
+  col    = colores_wk,
+  border = NA,
+  main   = paste0("WARD (k=", k,")")
+)
+
+# 2) Silueta K-means
+plot(
+  silhouette(km_res$cluster, midist),
+  col    = colores_km,
+  border = NA,
+  main   = paste0("K-MEANS (k=", k,")")
+)
+
+# 3) Silueta PAM
+plot(
+  silhouette(pam_res$clustering, midist),
+  col    = colores_pm,
+  border = NA,
+  main   = paste0("PAM (k=", k,")")
+)
+
+```
+
+Vemos como utilizando K-medias vemos como cada individuo está perfectamente clasificado en su cluster menos alguno que otro. Por ello utilizaremos el método de K-means a la hora de extraer nuestros clusters.
+
+Por otro lado, hemos visto como el número optimo de clusters que nos salian con los 3 métodos era 2. En nuestro caso este no nos serviría de nada, ya que nuestro objetivo es el de clasificar jugadores por estilo de juego similar que tengan además de experiencia, partidos jugados, etc. Por lo que para nosotros lo más importante sería que hubieran cuantos más grupos mejor para poder centrarnos en roles de jugadores específicos.
+Esto es bueno para nosotros ya que si seleccionaramos 2 o 3 clusters agruparíamos nuestros 500 jugadores en 3 grupos, lo que no tendría sentido en nuestro objetivo.
+Por lo que nos vamos a decantar por seleccionar un total de 10 clusters para que hayan grandes discrepancias entre jugadores, que es lo que se busca. Por lo que, si quisieramos ver un jugador alternativo a otro, tendríamos que ir al cluster de ese jugador y ver que otros jugadores hay en el cluster que juegen en su misma posición. Ya que si por ejemplo, nuestro jugador fuera un base y escogieramos un pivot no tendría sentido la elección.
+
+
+```{r kmeans-table}
+set.seed(42)
+# Ejecuta K-medias con 10 clústeres sobre tus variables numéricas
+km_res15 <- kmeans(df_num, centers = 10, nstart = 25)
+
+# Muestra la tabla de tamaños de cada clúster
+table(km_res15$cluster)
+```
+
+Vemos como nos salen unos grupos que queríamos, de forma concreta.
+Más adelante especificaremos de que trata cada cluster para ver si hemos acertado con nuestra elección.
+
+
+Pero ahora vamos a ver los jugadores que hay en cada cluster y su posición para poder elegir su remplazo.
+
+
+```{r}
+# 1) Asigna el cluster a tu tabla completa
+nba_pca$cluster_km <- factor(km_res15$cluster)
+
+# 2) Tabla de jugadores por clúster y posición
+tabla_cluster <- nba_pca %>%
+  select(Jugador = jugador, Posición = posicion, Cluster = cluster_km) %>%
+  arrange(Cluster, Posición, Jugador)
+
+tabla_cluster %>%
+  kable(
+    caption   = "Jugadores agrupados por clúster y posición",
+    row.names = FALSE
+  )
+
+
+# 3) Tabla de perfiles medios de variables numéricas por clúster
+tabla_perfiles <- df_num %>%
+  mutate(Cluster = km_res15$cluster) %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), mean))
+
+tabla_perfiles %>%
+  kable(
+    caption = "Perfiles medios de cada clúster (K-means)",
+    digits  = 2
+  )
+```
+
+CLUSTER 1
+En este grupo podemos apreciar aquellos jugadores que son recientes estrellas de la nba y jugadores que están a poco de convertirse en ellas. Encontramos jugadores que han sido all-star alguna vez en su carrera o que se han quedado a las puertas de serlo. Jugadores con gran impacto en cancha para su equipo, que se consideran estrellas de este, normalmente la segunda espada. 
+
+CLUSTER 2
+Para este grupo vemos que está formado por aquellos jugadores de rotación de un equipo. Un equipo suele jugar con uno 12/13 jugadores de media por partido en la temporada regular, y en este grupo se encuentran esos jugadores de banquillo que son de gran importancia para el equipo ya que dan descanso a los jugadores principales, obviamente no son estrellas, pero son necesarios ya que es importante los jugadores de banquillo.
+
+CLUSTER 3
+Son aquellos jugadores que tienen su rol especifico en el equipo, que salen y juegan sus 25 minutos desde el banquillo principalmente, pero que si algun partido por diversas situaciones deben jugar de titular lo hacen sin problema cumpliendo a la perfeccion. Son jugadores que si se encontraran en otro equipo y tuvieran mayor numero de oportunidades pordrían hacerse un hueco en el quinteto inicial sin problema ya que estan capacitados para ello.
+
+CLUESTER 4
+En este caso hablaríamos de jugadores de rol(rotación de banquillo) de una importancia un tanto menor que en el cluster 2, ya que no contribuyen tanto al juego de su equipo. Estos no tienen tanto impacto en rebotes ni puntos como en el cluster 2. Pero podrían pertenecer si su equipo le diera un poco más de importancia en el juego.
+
+CLUSTER 5
+Hablamos de jugadores que participan en algún que otro partido normalmente cuando se busca dar descanso a alguna parte de la plantilla(en la NBA se juega cada 2 días normalmente y hay mucha sobrecarga). Estos jugadores normalmente suelen ser veteranos en la liga y gusta mucho a los equipos tenerlos bajo su poder. Son aquellos jugadores que ya han vivido mucho en la liga y se acostumbran a jugar sus 20-25 partido al año no jugando muchos minutos, pero lo principal es su veteranía a la hora de afrontar las temporadas y ayudar al equipo.
+
+CLUSTER 6
+En este cluster encontramos jugadores interiores(SF-Alero,PF-AlaPivot y C-Pivot) que tienen un gran peso en su equipo pero son propensos a lesionarse dada su poca participacion a lo largo de la temporada. Estos jugadores son consinderados de gran importancia en el quinteto inicial como normalmente tercer mejor jugador, pero cogido con pinzas ya que un jugador pensado para esto debe tener un gran fisico y capacidad para estar presente en todos los partidos. Un GM debe tener mucho cuidado con estos jugadores ya que puede haber un gran desembolso económico en ellos y despúes que estén gran parte de la temporada lesionados.
+
+CLUSTER 7
+Podemos hablar de jugadores que no paran quietos en pista. Siempre estan en constante movimiento involucrado en jugadas. Son aquellos jugadores que se asocian con todo el equipo, que las jugadas pasan por ellos aun sin ser estrellas. No se quedan en la esquina esperando a que les llegue el triple como un jugador de rotación, sino que a pesar de salir bastante desde el banquillo(aun que también pueden jugar de titular) tienen un rol fundamental para que cuando no estan las estrellas el baloncesto de su equipo se juege de forma fluida.
+
+CLUSTER 8
+Son los jugadores que llevan el peso del partido para su equipo aquellos jugadores que pueden anotar 20/25 puntos cada noche sin problema para ayudar a que su equipo consiga la victoria. Aquellos que siempre tienen la pelota en sus manos controlando el juego de su equipo, unos anotadores natos, pero además son asistidores y grandes defensores que siempre están en contacto con la pelota y que su facilidad para anotar está a años luz con el resto de jugadores. Aquí hablamos de jugadores diferenciales para su equipo que muchos desearían tener.
+
+
+CLUSTER 9
+En este caso hablamos de aquellos jugadores que si se consideran de banquillo. De esos que suelen jugar pero sus minutos son los que diriamos de residuos, cuando un partido ya bva perdiendo o ganando de mucho, estos jugadores se encargan de dar descanso a los titulares para evitar posibles lesiones y así ganan experiencia en cancha por si se les necesitara en un momento clave de la temporada.Son jugadores que siempre deben de tener los equipos por cualquier immprevisto que haya, ya que deben cumplir como suplente si se les necesita o si el equipo se encuentra dentro de una mala racha de lesiones. Por lo que hablaríamos de jugadores que se adaptan perfectamente a su rol y saben lo que es estar muchos partido en el banquillo hasta que les llega su momento para cumplir.
+
+CLUSTER 10
+Aquí hablaríamos de aquellos jugadores que no jugan directamente, o si lo es no es relevante. Muchos equipos tienen a estos jugadores, que normalmente suelen estar en rodaje con el equipo sobretodo a la hora de realizar los entrenamientos. Son muy importantes en su rol que es el de que los titulares se sientan incomodos cuando entrenan contra ellos. Normalmente suelen considerarse jugadores jovenes que están en desarrollo con un equipo para ver si a base de entrenamientos convence a los entrenadores y consigue hacerse un hueco en el banquillo del equipo. Son los llamados jugadores de desarrollo. 
+
+
+
+
+
+A continuación vamos a buscar algunos ejemplos de jugadores y ver cuales podrían ser el remplazo del que queremos.
+Vamos a utilizar la funcion llamada get_sustitutos que nos devuelve los nombres de los jugadores cu
+
+```{r}
+get_sustitutos <- function(nombre) {
+  # Extraemos el clúster y la posición del jugador
+  info <- nba_pca %>% 
+    filter(jugador == nombre) %>%
+    select(cluster_km, posicion) %>%
+    slice(1)
+  
+  if (nrow(info) == 0) {
+    stop("No existe ese jugador en la base de datos.")
+  }
+  cl  <- info$cluster_km
+  pos <- info$posicion
+  
+  # Filtramos compañeros de clúster y posición, excluyendo al jugador original
+  nba_pca %>%
+    filter(cluster_km == cl,
+           posicion   == pos,
+           jugador    != nombre) %>%
+    select(Jugador = jugador,
+           Posición = posicion,
+           Cluster  = cluster_km)
+}
+
+
+```
+Nos vamos a centrar en encontrar un jugador que sea similar a T.J. McConnell, este es un jugador bastante importante desde el banquillo, que lleva la producción de su equipo desde esa segunda unidad(banquillo) y que puede realizar sin problemas su rol y ayudar al máximo al equipo.
+
+```{r}
+get_sustitutos("T.J. McConnell")
+```
+Podemos observar como Davion Mitchell, Devonte' Graham o Malcolm Brogdon entre otros serían jugadores a por los que ir en lugar de T.J. McConnell. 
+Consideramos de gran acierto estos jugadores ya que comparten estilos de juego de lo más similares entre ellos, que es lo que buscabamos, todo se consideran esos jugadores de banquillo capaces de generar para sus compañeros y encargados de tener el control de la pelota en aquellos momentos donde los titulares descansan en el partido.
+
+
+Ahora vamos a realizar otro ejemplo buscando un jugador similar a Santi Aldama, el español es un jugador que tiene un rol de suplente, pero que acostumbra cada vez más a salir de titular en su equipo. Buscamos jugadores que tengan un rol parecido y características similares a la hora de jugar.
+```{r}
+get_sustitutos("Santi Aldama")
+```
+Aquí vemos como jugadores muy similares a Santi Aldama encontraríamos a Bobby Portis(que tiene por delante a Giannis Antetokoumpo), Bol Bol(que tiene por delante a Paolo Banchero) y a Grant Williams(que tiene por delante a Jason Tatum). Son jugadores que tienen una forma de jugar similar, yendo al rebote bastante, teniendo un nivel defensivo bastante bueno, que suelen tirar de 3 bastante bien. Estos jugadores sus entrenadores ven como tienen mucho potencial y proyeccion y no quieren que esten tanto tiempo en el banquillo por lo que en ocasiones modifican el quinteto para incluirlos a ver si pueden sacarle el maximo rendimineto a sus jugadores.
+
+
+
+En resumen, creo que ha sido una decisión muy acertada seleccionar un gran número de clusters. En los ejemplos mostrados vemos como damos en el pleno de acierto con aquellos jugadores sustitutos de ese jugador que tanto deseabamos. Los jugadores proporcionados son muy similares al que buscabamos, por tanto el objetivo que teníamos lo hemos cumplido a la perfección y ya podríamos como GM de una franquicia tomar decisiones muy importantes en un equipo para la creación optima de su plantilla sin desbariar muy de los pensamientos que se tenían en un primer momento.

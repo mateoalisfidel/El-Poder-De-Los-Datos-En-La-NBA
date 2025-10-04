@@ -1,0 +1,661 @@
+---
+title: "PCA_PROYECTO"
+date: "2025-03-07"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,    # no mostrar código
+  warning = FALSE,    # no mostrar avisos
+  message = FALSE,     # no mostrar mensajes
+  results = 'hide'
+)
+  
+```
+
+```{r Librerias, include = FALSE}
+library(factoextra)
+library(FactoMineR)
+library(readr)
+library(corrplot)
+library(dplyr)
+library(knitr)
+library(gridExtra)
+library(tidyr)
+library(GGally)
+```
+
+El objetivo de realizar un PCA a los jugadores de NBA es identificar patrones de rendimiento y eficiencia entre los jugadores de la NBA, permitiendo descubrir perfiles de juego diferenciados a partir de sus estadísticas individuales.
+
+Mediante la reducción de la dimensionalidad del conjunto de variables, se pretende representar de forma visual y simplificada las principales características que definen a los jugadores, facilitando la detección de estilos de juego, fortalezas y debilidades, así como la comparación objetiva entre ellos.
+
+## Lectura y preparación de datos
+
+Para comenzar con el estudio de los jugadores de la NBA, primero cargamos los datos desde el archivo csv con las modificaciones que se han realizado previamente en la limpieza y preparación de los datos. 
+Cuanto más juega un jugador, más puntos debería anotar. Sin embargo, esto no siempre es cierto: hay jugadores que, aunque disputen muchos minutos, tienen un rol más pasador o defensivo, y otros que, jugando poco, son extremadamente eficientes ofensivamente.
+Por lo tanto, es importante tener en cuenta el número de minutos jugados y los puntos anotados por partido para evaluar el rendimiento de un jugador.
+Se han calculado las estadísticas por minuto real, y ponderado por minutos jugados por partido con la función log(x+1) de manera que hemos dado más peso a los que más minutos juegan sin exagerlo. Con esto conseguimos que los jugadores que son muy productivos pero apenas juegan ya no se inflan y será una mejor escala para el PCA.
+
+
+```{r Lectura de datos}
+# 1. Cargar el dataset
+
+nba_ajustado <- read.csv("nba_2022_2023_ajustado_limpio.csv", as.is = TRUE)
+head(nba_ajustado)
+
+nba <- read.csv("nba_2022_2023.csv", as.is = TRUE)
+```
+
+
+
+```{r tipos de datos}
+# 2. Construir la tabla de descripción
+categ_vars <- c("all_stars") 
+
+descNBA <- data.frame(
+  Variable     = colnames(nba_ajustado),
+  Tipo_de_Dato = ifelse(
+                   colnames(nba_ajustado) %in% categ_vars,
+                   "categorica",
+                   sapply(nba_ajustado, class)
+                 ),
+  stringsAsFactors = FALSE
+)
+
+print(descNBA)
+
+
+```
+
+
+## Centrado y escalado de los datos
+
+Para poder realizar el PCA, es importante centrar y escalar los datos. Esto se hace para que todas las variables tengan la misma importancia en el análisis.
+
+```{r Centrado y escalado}
+# 3. Centrar y escalar los datos
+vars_excluir <- c( "edad", "all_stars", 
+                  "partidos_jugados", "partidos_titular")
+
+# Seleccionar las variables numéricas a transformar (sin las excluidas)
+vars_num <- nba_ajustado %>%
+  select(where(is.numeric)) %>%
+  select(-all_of(vars_excluir)) %>%
+  colnames()
+
+# Centrar y escalar solo las variables seleccionadas
+nba_z <- nba_ajustado
+nba_z[vars_num] <- scale(nba_ajustado[vars_num])
+
+# Ver los resultados
+head(nba_z)
+
+```
+
+
+## Selección de variables para el PCA
+
+
+La variable rebotes no se usará porque es combinación lineal de las variables ro (rebotes ofensivos) y rd (rebotes defensivos)
+Para realizar el PCA no nos interesan las variables partidos_jugados ni partidos_titular, ya que hemos transformado las variables por minuto real y ponderado por minutos jugados por partido, si las incluimos corremos el riesgo de que la primera componente principal distiga "titulares" de "suplentes" y no el rendimiento de los jugadores que es lo que buscamos. 
+Además, la variable all_stars no se usará porque es categórica y no numérica, edad tampoco nos interesa y el nombre tampoco porque es identificativo.
+Comprobamos que las variables  no están correlacionadas 
+
+
+```{r Seleccion de variables y limpieza de observaciones para el estudio PCA}
+
+
+# 1. Variables que NO se utilizarán en el PCA
+vars_excluir <- c("edad", "all_stars", 
+                  "partidos_jugados", "partidos_titular", "rebotes_aj")
+
+# 2. Selección de variables numéricas que SÍ se utilizarán
+vars_num <- nba_z %>%
+  select(where(is.numeric)) %>%
+  select(-all_of(vars_excluir)) %>%
+  colnames()
+
+# 3. Calcular la matriz de correlaciones solo con las variables seleccionadas
+corr_matrix <- cor(nba_z[vars_num])
+
+# 4. Visualización de la matriz de correlaciones
+corrplot(
+  corr_matrix, 
+  method = "color",        
+  type = "upper",          
+  tl.col = "black",        
+  tl.cex = 0.8,             
+  number.cex = 0.7,         
+  addCoef.col = "black",   
+  col = colorRampPalette(c("blue", "white", "red"))(200),  
+  diag = FALSE             
+)
+
+```
+# Eliminación de tiros_anotados_aj y tiros_intentos_aj
+- Motivo: Ambas variables están fuertemente correlacionadas entre sí y con puntos_aj (r > 0.9).
+- Explicación:
+                puntos_aj ya recoge de forma directa la capacidad anotadora total del jugador (incluye tiros de campo y tiros libres).  
+                Mantener tiros_anotados_aj o tiros_intentados_aj duplicaría la información sobre volumen de lanzamientos, lo que haría que el primer componente del PCA reflejara solo volumen de tiro y no diferentes perfiles de rendimiento.
+- Conclusión: Se mantiene puntos_aj como variable resumen y se eliminan los intentos y aciertos de tiros totales.
+
+# Eliminación de triples_amotados_aj 
+- Motivo: Correlación altísima con tripes_intentados_aj (r > 0.98).
+
+- Explicación: Si se busca caracterizar perfiles de jugadores (tiradores, penetradores, interiores), es más informativo saber cuántos triples intentan (volumen de juego exterior) que cuántos anotan.
+                
+- Conclusión: Mantener tripes_intentados_aj para caracterizar perfiles de juego orientados al triple.
+
+# Eliminación de tiros_2_anotados_aj y tiros_2_intentados_aj
+- Motivo:   
+          Estas variables están directamente incluidas en puntos_aj.
+          Correlaciones muy altas entre ellas y con puntos_aj (r > 0.9).
+
+- Explicación: En PCA buscamos independencia conceptual entre variables. Estas solo aportan información redundante sobre el volumen de tiros de dos puntos, ya representado en la anotación total.
+
+- Conclusión: Se eliminan.
+
+# Eliminación de tl_anotados_aj
+- Motivo: Redundante con tl_intentados_aj (r > 0.98).
+
+- Explicación:
+
+          En análisis de perfiles, es más interesante saber cuántas veces un jugador provoca faltas y va a la línea de tiros libres (agresividad ofensiva), que cuántos anota.
+
+          La eficiencia de tiro libre no es tan relevante para definir un perfil de estilo de juego.
+
+- Conclusión: Se mantiene tl_intentados_aj y se elimina tl_anotados_aj.
+
+#Eliminacion de la varible robos_aj
+- Motivo: A pesar de no tener alta correlación se elimina por ser la suma de robos defensivos y ofensivos y estas se miden en otras variables y así evitamos colinealidad.
+
+
+Se han eliminado las variables relacionadas con el número de tiros y anotaciones directas (tanto de campo como de tiros libres) debido a su alta colinealidad con la variable puntos_aj y entre sí. Mantener estas variables habría provocado que la primera componente principal reflejara únicamente volumen de anotación, impidiendo detectar perfiles de juego diferenciados. En su lugar, se han conservado variables que permiten distinguir estilos de juego (por ejemplo, intentos de triples o tiros libres como indicadores de rol ofensivo) y aquellas relacionadas con la aportación en aspectos defensivos y de creación de juego, facilitando así la identificación de patrones de rendimiento y eficiencia de los jugadores.
+
+```{r Seleccion de variables y limpieza de observaciones para el estudio del PCA}
+
+# 5. Eliminar variables con correlación alta (r > 0.9) de forma manual y controlada
+vars_eliminar <- c(
+  "tiros_anotados_aj", 
+  "tiros_intentados_aj", 
+  "triples_anotados_aj", 
+  "tiros_2_anotados_aj", 
+  "tiros_2_intentados_aj", 
+  "tl_anotados_aj",
+  "robos_aj"
+)
+
+# Actualizamos la selección de variables numéricas para el PCA
+vars_num_final <- setdiff(vars_num, vars_eliminar)
+
+# Confirmamos las variables finales que entran al PCA
+vars_num_final
+
+# 6. Matriz de correlaciones final, para verificar que no quedan redundancias excesivas
+corr_matrix_final <- cor(nba_z[vars_num_final])
+# Visualización de la nueva matriz de correlaciones
+corrplot(
+  corr_matrix_final, 
+  method = "color",        
+  type = "upper",          
+  tl.col = "black",        
+  tl.cex = 1.2,             
+  number.cex = 1,           
+  addCoef.col = "black",   
+  col = colorRampPalette(c("blue", "white", "red"))(200),  
+  diag = FALSE
+)
+```
+
+## Selección Componentes Principales PCA
+
+Generamos el modelo PCA para todas las posibles componentes principales (o un elevado número de ellas) y seleccionamos el número “óptimo” de componentes principales (PCs). 
+```{r Preparación dataset PCA}
+# 1. Crear el dataframe definitivo que se usará en el PCA
+nba_pca <- nba_z[, c(
+  vars_num_final,                # Variables activas para el PCA
+  "posicion", "all_stars",       # Variables cualitativas suplementarias
+  "partidos_jugados", "partidos_titular", "jugador"  # Variables cuantitativas suplementarias
+)]
+
+
+# 2. Visualizamos la estructura de la tabla final antes de aplicar el PCA
+str(nba_pca)
+
+```
+
+```{r PCA2}
+#3. Realizamos PCA
+pca_res <- PCA(
+  nba_pca, 
+  scale.unit = FALSE,  # Ya está escalado
+  quali.sup = which(colnames(nba_pca) %in% c("posicion", "all_stars", "jugador")),
+  quanti.sup = which(colnames(nba_pca) %in% c("partidos_jugados", "partidos_titular")),
+  graph = FALSE
+)
+# 4. Calcular los valores propios (varianza explicada)
+eig.val <- get_eigenvalue(pca_res)
+
+# 5. Calcular la varianza explicada media (para trazar la línea de referencia)
+VPmedio <- 100 * (1 / nrow(eig.val))
+
+# 6. Graficar la varianza explicada con la línea de la media
+fviz_eig(pca_res, addlabels = TRUE) + 
+  geom_hline(yintercept = VPmedio, linetype = 2, color = "red")
+
+kable(eig.val[1:7,])
+
+
+```
+Aplicando tanto la regla del codo como la regla de la media (Kaiser), se concluye que es adecuado conservar dos componentes principales. La regla del codo muestra un cambio brusco en la pendiente tras la segunda componente, indicando que a partir de ahí la ganancia en varianza explicada es marginal. Por su parte, la regla de la media establece un umbral del 10%, superado claramente solo por las dos primeras componentes (36.3% y 31.9%), mientras que la tercera queda por debajo. Por tanto, conservar dos componentes permite simplificar la representación de los datos manteniendo un elevado porcentaje de varianza explicada (68.2%) y facilitando una interpretación visual clara.
+
+```{r PCA}
+K = 2
+pca_res <- PCA(
+  nba_pca, 
+  scale.unit = FALSE,  # Ya está escalado
+  quali.sup = which(colnames(nba_pca) %in% c("posicion", "all_stars", "jugador")),
+  quanti.sup = which(colnames(nba_pca) %in% c("partidos_jugados", "partidos_titular")),
+  graph = FALSE, 
+  ncp = K
+)
+
+```
+# Validación del modelo PCA
+
+## Detección de anómalos con T2-Hotelling
+El estadístico T2 de Hotelling nos permite identificar valores anómalos extremos, que podrían estar condicionando el modelo, es decir, la creación de las PCs.
+
+```{r T2 DE HOTELLING}
+
+# 1. Extraer las coordenadas (scores) de los jugadores en los K primeros componentes
+misScores <- pca_res$ind$coord[, 1:K]
+
+# 3. Calcular la estadística Hotelling's T² para cada jugador
+miT2 <- colSums(t(misScores^2) / eig.val[1:K, 1])
+
+# 4. Calcular los umbrales de control (F-distribution thresholds)
+I <- nrow(nba_pca)  # Número de jugadores (individuos)
+
+F95 <- K * (I^2 - 1) / (I * (I - K)) * qf(0.95, K, I - K)  # Umbral del 95%
+F99 <- K * (I^2 - 1) / (I * (I - K)) * qf(0.99, K, I - K)  # Umbral del 99%
+
+# 5. Gráfico de Hotelling T² para detección de anomalías
+plot(
+  1:length(miT2), miT2, type = "p", 
+  xlab = "Jugadores", 
+  ylab = "Estadístico T² de Hotelling",
+  main = "Detección de Anomalías con Hotelling T²"
+)
+abline(h = F95, col = "orange", lty = 2, lwd = 2)  # Umbral 95%
+abline(h = F99, col = "red3", lty = 2, lwd = 2)    # Umbral 99%
+
+anomalas = which(miT2 > F95)
+anomalas # Jugadores anómalos)
+```
+### Score Plots
+
+```{r SCORES}
+# 1. Crear un factor para marcar observaciones normales y anómalas
+anomalia_factor <- factor(miT2 > F95, labels = c("Normal", "Anómalo"))
+
+# 2. Primer gráfico: Componentes 1 vs 2
+p1 <- fviz_pca_ind(
+  pca_res, 
+  axes = c(1, 2), 
+  geom = "point", 
+  habillage = anomalia_factor, 
+  palette = c("grey", "red"),
+  addEllipses = FALSE,
+  legend.title = "Tipo"
+) + 
+  ggtitle("Componentes 1 vs 2") + 
+  theme_minimal()
+
+
+
+# 3. Mostrar los dos gráficos en una sola fila
+p1
+
+```
+
+
+```{r Anómalos T2}
+# 6. Resumen de jugadores anómalos
+anomalos_df <- nba_pca[anomalas, c("jugador", "posicion", "all_stars", "partidos_jugados", "partidos_titular")]
+
+# Añadir la columna con la puntuación T²
+anomalos_df$T2 <- miT2[anomalas]
+
+# Ordenar de mayor a menor T²
+anomalos_df <- anomalos_df[order(-anomalos_df$T2), ]
+
+# Ver el resultado
+head(anomalos_df)
+```
+Al fijar el umbral de control en el 95% mediante el estadístico T² de Hotelling, se asume que el 5% de las observaciones podrían superar dicho límite por simple variabilidad natural de los datos, sin ser necesariamente casos anómalos reales.
+
+En un conjunto de 508 jugadores, esto equivale a aproximadamente 25 jugadores que, incluso en condiciones normales, se espera que sobrepasen el umbral simplemente por azar. El número de jugadores identificados como anómalos es superior a este valor en nueve unidades, podría indicar la existencia de perfiles estadísticamente extremos que merecen un análisis más detallado, pero observamos que los anómalos han jugado muchos partidos, lo que podría indicar que son jugadores con un rol muy importante en el equipo y también se encuentran jugadores que han participado en los all stars, lo que reafirma nuestra suposición. 
+
+Se va analizar la contribución de cada variable a la estadística T² de Hotelling para los jugadores más anómalos extremos, con el fin de identificar qué variables son las que más influyen en su clasificación como anómalos.
+
+### Análisis de jugadores anómalos
+```{r}
+contribT2 = function (X, scores, loadings, eigenval, observ, cutoff = 2) {
+  # X is data matrix and must be centered (or centered and scaled if data were scaled)
+  misScoresNorm = t(t(scores**2) / eigenval)
+  misContrib = NULL
+  for (oo in observ) {
+    print(rownames(scores)[oo])
+    print(scores[oo,])
+    misPCs = which(as.numeric(misScoresNorm[oo,]) > cutoff)
+    lacontri = sapply(misPCs, function (cc) (scores[oo,cc]/eigenval[cc])*loadings[,cc]*X[oo,])
+    lacontri = rowSums((1*(sign(lacontri) == 1))*lacontri)
+    misContrib = cbind(misContrib, lacontri)
+  }
+  colnames(misContrib) = rownames(misScoresNorm[observ,])
+  return(misContrib)
+}
+```
+
+```{r Análisis de jugadores anómalos}
+
+# 1. Filtrar los jugadores anómalos
+jugadores_anom <- c("Giannis Antetokounmpo", "Joel Embiid", "Luka Doncic", "Trae Young", "Damian Lillard", "Walker Kessler")
+observ_anom <- which(nba_pca$jugador %in% jugadores_anom)
+
+misLoadings = sweep(pca_res$var$coord, 2, sqrt(pca_res$eig[1:K,1]), FUN="/")
+
+X = as.matrix(nba_pca[vars_num_final])
+
+# 2. Calcular las contribuciones de las variables
+mycontrisT2 = contribT2(
+  X = X,
+  scores = misScores, 
+  loadings = misLoadings, 
+  eigenval = eig.val[1:K, 1], 
+  observ = observ_anom
+)
+
+# 3. Visualizar las contribuciones de cada jugador anómalo 
+for (i in seq_along(observ_anom)) {
+  jugador_nombre <- nba_pca$jugador[observ_anom[i]]
+  
+  par(mar = c(10, 2.3, 3, 1))  # Ajuste de márgenes para nombres largos
+  barplot(
+    mycontrisT2[, i], 
+    las = 2, 
+    main = paste0("Jugador: ", jugador_nombre),
+    col = "steelblue",
+    ylab = "Contribución a T²"
+  )
+}
+```
+Damian Lillard (PG):
+Lillard es detectado como anómalo debido a sus valores excepcionalmente altos en puntos, triples intentados, tiros libres intentados y asistencias, propios de un jugador con un papel ofensivo dominante. Además, su alta participación en el juego genera también un número elevado de pérdidas. Siendo uno de los bases top de la liga, es lógico que sus métricas se alejen de la media y es imprescindible mantenerlo en el análisis para representar correctamente a los jugadores estrella.
+
+Giannis Antetokounmpo (PF):
+Su anomalía se explica por valores desproporcionadamente altos en tiros libres intentados, rebotes ofensivos y defensivos y puntos, lo que refleja su dominio absoluto en la zona. También acumula un volumen elevado de pérdidas, propio de su protagonismo ofensivo. Como uno de los jugadores más dominantes de la NBA, su perfil debe conservarse en el modelo para entender los extremos de rendimiento en la competición.
+
+Joel Embiid (C):
+Embiid presenta valores extremos en tiros libres intentados, puntos y rebotes defensivos, siendo además un generador de juego interior que asume un alto riesgo de pérdidas. Su rol como máximo anotador y MVP justifica que sea un caso extremo en el análisis, y es fundamental incluirlo para representar a los grandes referentes ofensivos de la liga.
+
+Trae Young (PG):
+Detectado como anómalo por sus altísimos valores en asistencias, puntos, tiros libres intentados y pérdidas, propios de un base con gran protagonismo en la creación y definición del juego. Como uno de los bases top en generación de juego y anotación, su perfil extremo aporta información clave para representar estilos de juego ofensivos muy marcados.
+
+Walker Kessler (C):
+Su anomalía se debe a valores extremadamente altos en tapones y rebotes, consolidándolo como un especialista defensivo de élite. Aunque su aportación ofensiva es reducida, su perfil representa a los jugadores top en tareas defensivas, siendo clave para entender estilos de juego basados en la protección del aro y la defensa interior.
+
+## Distancia al modelo (SCR) 
+
+Ahora estudiaremos la distancia al modelo PCA mediante la Suma de Cuadrados Residual (SCR), que nos ayudará a detectar los valores anómalos moderados, es decir, aquellos jugadores que no están bien explicados por el modelo PCA. 
+Las observaciones con SCR alto no están bien explicadas por el modelo PCA; son casos en los que las componentes retenidas no capturan correctamente su información.
+Esta medida permite detectar anomalías moderadas, es decir, observaciones que, aunque no sean outliers extremos (según T² de Hotelling), presentan características poco representativas en el espacio reducido de las componentes.
+Se complementa con la T² de Hotelling para analizar tanto anomalías severas (alto T², baja SCR) como moderadas (alta SCR).
+
+Calculamos la matriz de residuos y a partir de ellos la SCR. 
+
+```{r SCR2}
+# 1. Definir X: Datos centrados y escalados solo con las variables activas del PCA
+X <- as.matrix(nba_pca[, vars_num_final])
+
+# 2. Recuperar los loadings "puros" (deshaciendo la ponderación de FactoMineR)
+misLoadings <- sweep(
+  pca_res$var$coord[, 1:K], 
+  2, 
+  sqrt(pca_res$eig[1:K, 1]), 
+  FUN = "/"
+)
+
+# 3. Calculamos la matriz de residuos (reconstrucción aproximada y error)
+myE <- X - misScores[, 1:K] %*% t(misLoadings)
+
+# 4. Cálculo de la SCR (suma de los cuadrados de los residuos)
+mySCR <- rowSums(myE^2)
+
+# 5. Calculamos los umbrales de control usando la distribución Chi-cuadrado
+g <- var(mySCR) / (2 * mean(mySCR))
+h <- (2 * mean(mySCR)^2) / var(mySCR)
+chi2lim_95 <- g * qchisq(0.95, df = h)   # Umbral al 95%
+chi2lim_99 <- g * qchisq(0.99, df = h)   # Umbral al 99%
+
+# 6. Visualización de la Distancia al Modelo (SCR)
+plot(
+  1:length(mySCR), mySCR, type = "l", 
+  main = "Distancia al Modelo PCA (SCR)", 
+  ylab = "SCR", xlab = "Jugadores", 
+  ylim = c(0, max(mySCR) * 1.1)
+)
+abline(h = chi2lim_95, col = "orange", lty = 2, lwd = 2)  # Límite 95%
+abline(h = chi2lim_99, col = "red3", lty = 2, lwd = 2)    # Límite 99%
+
+# 7. Identificar jugadores con SCR alto
+jugadores_scr_95 <- which(mySCR > chi2lim_95)
+jugadores_scr_99 <- which(mySCR > chi2lim_99)
+
+# 8. Mostrar nombres de los jugadores anómalos por SCR
+jugadores_95 <- nba_pca$jugador[jugadores_scr_95]
+jugadores_99 <- nba_pca$jugador[jugadores_scr_99]
+
+print("Jugadores con SCR > 95%:")
+print(jugadores_95)
+
+print("Jugadores con SCR > 99%:")
+print(jugadores_99)
+
+
+```
+El gráfico de la Distancia al Modelo (SCR) permite evaluar qué tan bien el modelo PCA explica las estadísticas de los jugadores de la NBA. La gran mayoría de los jugadores se concentra en valores bajos de SCR, lo que indica que su rendimiento queda bien representado por las componentes principales seleccionadas.
+
+Tal como es esperable según los umbrales de control, se detectan 5 jugadores por encima del límite del 99% y 10 jugadores por encima del 95%, lo que representa aproximadamente el porcentaje de casos que estadísticamente se considera aceptable en este tipo de análisis. Estos jugadores corresponden a perfiles que no encajan bien en el modelo, lo que sugiere la existencia de estilos de juego atípicos o poco representativos en las dimensiones principales.
+
+Aunque se va a estudiar la contribución de cada variable a la SCR de los más anomalos moderados. 
+
+```{r SCR}
+# 1. Lista fija de jugadores con SCR > 99%
+jugadores_scr_99 <- c("Ben Simmons", "Brook Lopez", "Jaren Jackson Jr.", 
+                      "Jimmy Butler", "Ryan Rollins")
+
+# 2. Localizamos las observaciones en el dataframe
+observ_scr_99 <- which(nba_pca$jugador %in% jugadores_scr_99)
+
+# 3. Visualizamos las contribuciones a la SCR para cada jugador
+for (i in 1:length(observ_scr_99)) {
+  jugador_nombre <- nba_pca$jugador[observ_scr_99[i]]
+  
+  # Calculamos las contribuciones de cada variable (residuo al cuadrado)
+  residuos_jugador <- myE[observ_scr_99[i], ]^2  
+  
+  par(mar = c(10, 2.3, 3, 1))  # Ajuste de márgenes para nombres largos
+  barplot(
+    residuos_jugador, 
+    names.arg = colnames(X), 
+    las = 2, 
+    main = paste0("Jugador: ", jugador_nombre, "\nContribuciones a la SCR"),
+    col = "darkorange",
+    ylab = "Contribución a SCR"
+  )
+}
+
+```
+En el caso de Ben Simmons, la principal discrepancia se produce en la variable asistencias, que presenta una contribución claramente dominante a la SCR. Además, se observan aportes secundarios en las variables relacionadas con intentos de tiro. 
+
+Para Brook Lopez y Jaren Jackson Jr., la variable que más eleva la SCR es, de forma muy destacada, tapones. Esto indica que el modelo no consigue reproducir correctamente el valor de esta métrica, que presenta un comportamiento extremo en estos jugadores. En el resto de variables, los errores de reconstrucción son mínimos.
+
+En el gráfico de Jimmy Butler, las principales contribuciones a la SCR provienen de las variables tiros libres intentados y triples intentados, lo que sugiere que el modelo no capta correctamente la combinación de estas métricas. También se observan contribuciones relevantes en las variables pérdidas y faltas, relacionadas con el contacto y las situaciones de juego que no terminan en anotación.
+
+Por último, en el caso de Ryan Rollins, la contribución a la SCR se concentra casi exclusivamente en la variable pérdidas, que presenta un valor muy elevado respecto al modelo. Las restantes variables muestran errores de reconstrucción poco significativos.
+Como dato externo observamos que los 4 primeros son titulares en un % elevado de sus partidos e incluso habiendo un jugador de la all stars, sin embargo, Ryan Rollins era un rookie en esa temporada que ha jugado pocos partidos y no ha sido titular en ninguno de ellos, lo que podría explicar su anomalía.
+
+# Interpretación de los resultados del PCA
+
+##  Gráfico de loadings
+Primero se va a analizar el gráfico de variables . 
+
+```{r Interpretación de los resultados PCA}
+
+# Visualización de las variables en los dos primeros componentes principales
+fviz_pca_var(
+  pca_res, 
+  axes = c(1, 2), 
+  repel = TRUE,  # Evita que los nombres de las variables se solapen
+  col.var = "contrib",  # Colorea según la contribución de las variables
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),  # De menor a mayor contribución
+  title = "Representación de Variables (Dim 1 y 2)"
+)
+# 1. Crear un subconjunto eliminando las variables auxiliares
+vars_principales <- setdiff(vars_num_final, c("partidos_jugados", "partidos_titular"))
+
+# 2. Visualizar solo las variables activas que participaron en el PCA
+fviz_pca_var(
+  pca_res,
+  axes = c(1, 2),
+  select.var = list(name = vars_principales),  # Solo las variables activas
+  repel = TRUE,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  title = "Representación de Variables Activas (Dim 1 y 2)"
+)
+
+```
+Las variables han sido coloreadas según su contribución a las dos primeras componentes principales del análisis PCA. En color azul se representan las variables auxiliares (partidos_jugados y partidos_titular), que no han sido utilizadas directamente en la obtención del modelo, pero se han proyectado sobre el nuevo espacio de componentes para facilitar su interpretación.
+
+La primera componente principal (PC1), que explica el 36,3% de la varianza, está principalmente influenciada por las variables relacionadas con la anotación y la participación ofensiva, destacando puntos_aj, tl_intentados_aj y perdidas_aj, todas ellas con alta contribución y claramente orientadas en la misma dirección. Esto indica que PC1 diferencia a los jugadores según su protagonismo en ataque, tanto en volumen de tiro como en la generación de oportunidades que pueden derivar en pérdidas.
+
+Por otro lado, la segunda componente principal (PC2), que explica el 31,9% de la varianza, está asociada a variables relacionadas con la actividad defensiva y sin balón, especialmente rebotes_ofensivos (ro_aj), rebotes_defensivos (rd_aj), tapones_aj y faltas_aj. Estas variables se agrupan en la parte superior del gráfico, lo que sugiere que PC2 permite diferenciar a los jugadores según su implicación en acciones defensivas y en la lucha por el rebote.
+
+Las variables auxiliares proyectadas, partidos_jugados y partidos_titular, se alejan claramente del centro, apuntando hacia la derecha del gráfico. Esto indica que estas variables están muy relacionadas con PC1, reforzando la interpretación de que la primera componente captura el volumen de participación de los jugadores en la competición.
+
+En cuanto a la relación entre variables, se observa una fuerte asociación positiva entre puntos_aj, tl_intentados_aj y perdidas_aj, lo que sugiere que los jugadores que más lanzan y anotan también tienen un mayor número de pérdidas, también se observa que están relacionadas con los partidos_jugados y partidos_titular, sugiere que cuanto más partidos juegues más puntos, tiros y lanzamientos efectuará. . Además, existe cierta relación entre ro_aj, tapones_aj y faltas_aj, lo que indica que los jugadores más activos en defensa tienden también a cometer más faltas.
+
+Por tanto, este gráfico refleja claramente las dos grandes dimensiones del juego de los jugadores de la NBA:
+
+      - Una dimensión ofensiva vinculada al volumen de anotación.
+
+      - Una dimensión defensiva ligada a la actividad en rebote y tapones.
+
+Para comporobar las hipótesis de que los jugadores que más juegan son los que más puntos anotan, se ha realizado un gráfico de dispersión. 
+
+
+```{r Gráfico de dispersión}
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor = 5, ...) {
+  par(usr = c(0, 1, 0, 1))
+  r <- cor(x, y, use = "complete.obs")
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  # Aquí controlas el tamaño de la fuente (ajústalo si quieres aún más grande)
+  text(0.5, 0.5, txt, cex = cex.cor * abs(r), font = 2)
+}
+
+
+
+# Variables ofensivas
+vars_ofensivas <- c("puntos_aj", "tl_intentados_aj", "perdidas_aj", 
+                    "partidos_jugados", "partidos_titular")
+
+pairs(
+  nba_pca[, vars_ofensivas],
+  lower.panel = panel.cor, 
+  pch = 20, 
+  col = "red3",
+  main = "Matriz de Dispersión - Variables Ofensivas"
+)
+
+# Variables defensivas
+vars_defensivas <- c("ro_aj", "rd_aj", "asistencias_aj", "tapones_aj", "faltas_aj", "partidos_jugados", "partidos_titular")
+
+pairs(
+  nba_pca[, vars_defensivas],
+  lower.panel = panel.cor, 
+  pch = 20, 
+  col = "steelblue",
+  main = "Matriz de Dispersión - Variables Defensivas"
+)
+
+
+```
+Dimensión Ofensiva:
+Se observa una fuerte correlación positiva entre las variables puntos_aj, tl_intentados_aj y perdidas_aj, lo que confirma que los jugadores con mayor volumen de juego ofensivo no solo anotan más puntos, sino que también asumen más riesgos, incrementando el número de pérdidas. Además, se confirma que los jugadores que han disputado más partidos (partidos_jugados y partidos_titular) son los que presentan mayores registros de anotación y actividad ofensiva.
+
+Dimensión Defensiva:
+En este caso, se aprecian correlaciones positivas entre ro_aj (rebotes ofensivos), rd_aj (rebotes defensivos), y faltas_aj, lo que sugiere que los jugadores más activos en defensa también tienden a incurrir en un mayor número de faltas. Asimismo, tapones_aj presenta una relación positiva con faltas_aj, indicando que los jugadores más involucrados en acciones defensivas de bloqueo también cometen más infracciones.
+
+## Score plot
+
+```{r Score plot}
+fviz_pca_ind(
+  pca_res, 
+  axes = c(1, 2), 
+  geom = "point",   # Solo puntos, sin etiquetas
+  habillage = "posicion", 
+  addEllipses = TRUE, 
+  palette = "jco", 
+  legend.title = "Posición", 
+  pointsize = 2.5
+)
+
+```
+
+A simple vista, se observa que los jugadores tienden a agruparse según su posición, lo que confirma que las características estadísticas consideradas en el análisis PCA reflejan de forma coherente los distintos roles ofensivos y defensivos propios de cada posición.
+
+## Biplot
+```{r Biplot}
+fviz_pca_biplot(
+  pca_res,
+  axes = c(1, 2),
+  label = "var",                  
+  repel = TRUE,                   
+  col.var = "black",              # Variables en negro (sin gradiente de contribución)
+  select.var = list(name = c(      # Eliminar variables no deseadas
+    "tripes_intentados_aj", "tl_intentados_aj", "ro_aj", "rd_aj", 
+    "asistencias_aj", "tapones_aj", "perdidas_aj", "faltas_aj", "puntos_aj"
+  )),
+  col.ind = nba_pca$posicion,     # Colorear por posición
+  palette = "jco",
+  addEllipses = FALSE,             
+  legend.title = "Posición",      
+  labelsize = 4, 
+  pointsize = 2.5
+)
+
+save(nba_pca, file = "nba_pca.RData")
+
+```
+Dimensión Ofensiva (PC1 - 36,3% de la varianza):
+- Las variables puntos_aj, tl_intentados_aj, perdidas_aj y en menor medida asistencias_aj tienen vectores largos y apuntan en la misma dirección, indicando que los jugadores con valores altos en esta dimensión son los que más protagonismo tienen en ataque.
+- Este grupo incluye a jugadores de posiciones ofensivas como PG (Base) y SG (Escolta), que tienden a generar juego y acumular puntos, pero también a cometer más pérdidas debido a su alta participación en las jugadas.
+
+Dimensión Defensiva (PC2 - 31,9% de la varianza):
+- Las variables ro_aj (rebotes ofensivos), rd_aj (rebotes defensivos), tapones_aj y faltas_aj están relacionadas con la actividad defensiva y de lucha por el balón.
+- Las posiciones de C (Pivot) y PF (Ala-Pivot) dominan en este plano, evidenciando su mayor implicación en acciones defensivas, rebote y protección del aro.
+
+En cuanto a la agrupación de jugadores, se observa:
+- Los Bases (PG) y Escoltas (SG) se sitúan a la derecha, asociados a la dimensión ofensiva.
+- Los Pivots (C) se concentran en la parte superior, lo que corrobora su perfil eminentemente defensivo y de lucha en la pintura.
+- Las posiciones SF (Aleros) y jugadores polivalentes (SG-PG, SF-PF, etc.) aparecen más dispersos, reflejando su versatilidad tanto en defensa como en ataque.
