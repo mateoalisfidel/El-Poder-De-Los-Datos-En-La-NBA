@@ -49,6 +49,11 @@ Por último, se aplica un modelo de **PLS-DA** para predecir qué jugadores tien
 
 ---
 
+## Autores
+- Mateo Alís
+- Sergio Ortiz
+- Manuel Caballero
+
 ## Cómo ejecutar
 1. Abrir los archivos `.Rmd` en RStudio  
 2. Instalar las librerías necesarias (`requirements.txt`)  
