@@ -33,7 +33,7 @@ Por último, se aplica un modelo de **PLS-DA** para predecir qué jugadores tien
 ## Resultados
 - Identificación de patrones de rendimiento de jugadores  
 - Jugadores con influencia en el juego y estilos similares para ayudar a los General Managers a tomar decisiones.
-- Predicción de All-Stars con métricas de evaluación (sustituye con tu resultado)  
+- Predicción de All-Stars con métricas de evaluación 
 - PDF con el informe completo en `docs/proyecto-nba.pdf`
 
 ---
